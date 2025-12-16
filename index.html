@@ -101,10 +101,10 @@
 
         // --- Configuration ---
         const CONFIG = {
-            count: 25000,     // High particle count for detailed shapes
+            count: 25000,      
             size: 0.12,
             camZ: 40,
-            stabilizeFrames: 15 // Must hold gesture for 15 frames to switch (Anti-Jitter)
+            stabilizeFrames: 15  
         };
 
         // --- State Management ---
@@ -113,7 +113,7 @@
             expansion: 0,
             currentShape: 'sphere',
             targetShape: 'sphere',
-            gestureTimer: 0,      // Counts frames for stabilization
+            gestureTimer: 0,   
             rightHandActive: false
         };
 
@@ -182,9 +182,7 @@
 
             animate();
         }
-
-        // --- SHAPE GENERATOR ENGINE ---
-        // This is where we mathematically construct the Bus, Car, etc.
+ 
 
         function getRandomPointInBox(w, h, d, offsetX, offsetY, offsetZ) {
             return {
@@ -220,15 +218,14 @@
                     const rnd = Math.random();
                     if (rnd < 0.6) { 
                         // Body (Cylinder)
-                        p = getRandomPointInCylinder(2.5, 18, 'z', 0, 15, 0); // Vertical cylinder actually
-                        // Manual rotate to vertical
+                        p = getRandomPointInCylinder(2.5, 18, 'z', 0, 15, 0); 
                         let temp = p.y; p.y = p.x + 2; p.x = temp; 
                         c.setHSL(0.6, 0.9, 0.6); // Blue body
                     } else if (rnd < 0.8) {
                         // Nose Cone
                         const h = 5; const r = 2.5;
                         const angle = Math.random() * Math.PI * 2;
-                        const radius = Math.random() * r * (1 - Math.random()); // Cone math
+                        const radius = Math.random() * r * (1 - Math.random());  
                         p.x = Math.cos(angle) * radius;
                         p.z = Math.sin(angle) * radius;
                         p.y = 11 + Math.random() * h;
@@ -241,12 +238,12 @@
                         p.x = Math.cos(angle) * r;
                         p.z = Math.sin(angle) * r;
                         p.y = -6 + (Math.random() * 4);
-                        c.setHSL(0.1, 1.0, 0.5); // Orange fins
+                        c.setHSL(0.1, 1.0, 0.5);  
                     }
                 }
 
                 // --- 2. BIKE (Motorcycle) ---
-                else if (type === 'bike') {
+                else if (type === 'bike') { 
                     const rnd = Math.random();
                     if (rnd < 0.3) {
                         // Front Wheel
@@ -463,10 +460,7 @@
                 else if (fingerCount === 5) detectedShape = 'sphere';
                 else if (fingerCount === 0) detectedShape = 'chaos';
 
-                // STABILIZER / DEBOUNCE LOGIC
-                // If detected shape matches the *pending* target, increase timer.
-                // If it matches current, do nothing.
-                // If it's a new random shape, reset timer.
+ 
                 
                 if (detectedShape === state.targetShape) {
                     state.gestureTimer++;
@@ -475,7 +469,7 @@
                     state.gestureTimer = 0;
                 }
 
-                // Only switch if we held the gesture for N frames
+ 
                 if (state.gestureTimer > CONFIG.stabilizeFrames && state.targetShape !== state.currentShape) {
                     updateShapeTargets(state.targetShape);
                     highlightUI(state.targetShape);
@@ -498,11 +492,6 @@
             if (lm[12].y < lm[10].y) count++; // Middle
             if (lm[16].y < lm[14].y) count++; // Ring
             if (lm[20].y < lm[18].y) count++; // Pinky
-
-            // Thumb Logic (More complex)
-            // We check if thumb tip is far from index base (Knuckle) in X axis
-            // For Left hand: Thumb is on Right side of hand.
-            // If Thumb Tip x is > Index MCP x, it's open. (Rough approx)
             if (lm[4].x > lm[3].x) count++;
 
             return count;
