@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Hand-Tracked Particle Engine</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; color: white; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        
+        #video-container { 
+            position: absolute; bottom: 20px; right: 20px; 
+            width: 240px; height: 180px; 
+            transform: scaleX(-1); 
+            border: 2px solid #444; border-radius: 12px; 
+            overflow: hidden; z-index: 10;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+        }
+        video { width: 100%; height: 100%; object-fit: cover; }
+
+        #ui { position: absolute; top: 20px; left: 20px; pointer-events: none; z-index: 20; }
+        h1 { margin: 0; font-size: 2rem; letter-spacing: 2px; text-shadow: 0 0 20px cyan; }
+        
+        .panel { 
+            background: rgba(10, 10, 15, 0.7); 
+            backdrop-filter: blur(8px);
+            padding: 15px; 
+            border-left: 4px solid #00d2ff; 
+            margin-top: 15px;
+            border-radius: 0 10px 10px 0;
+            width: 220px;
+        }
+        .key { color: #00d2ff; font-weight: bold; text-transform: uppercase; font-size: 0.85rem; }
+        .item { display: flex; justify-content: space-between; font-size: 0.9rem; margin-top: 4px; color: #ccc; }
+        .active-mode { color: #fff; text-shadow: 0 0 5px #fff; font-weight: bold; }
+
+        /* Loading Screen */
+        #loading { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; z-index: 100;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+        }
+        .loader {
+            width: 50px; height: 50px; border: 5px solid #222; border-top: 5px solid cyan; 
+            border-radius: 50%; animation: spin 1s infinite linear; margin-bottom: 20px;
+        }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        
+        #progress-bar {
+            width: 200px; height: 4px; background: #222; border-radius: 2px; overflow: hidden;
+        }
+        #progress-fill { width: 0%; height: 100%; background: cyan; transition: width 0.3s; }
+    </style>
+</head>
+<body>
+
+    <div id="loading">
+        <div class="loader"></div>
+        <div id="status-text">Booting Particle Engine...</div>
+        <div id="progress-bar"><div id="progress-fill"></div></div>
+    </div>
+    
+    <div id="ui">
+        <h1>HoloParticles AI</h1>
+        <div class="panel">
+            <div class="key">🖐 LEFT HAND (Shape Select)</div>
+            <div class="item" id="mode-rocket"><span>1 Finger</span> <span>Rocket</span></div>
+            <div class="item" id="mode-bike"><span>2 Fingers</span> <span>Bike</span></div>
+            <div class="item" id="mode-car"><span>3 Fingers</span> <span>Car</span></div>
+            <div class="item" id="mode-bus"><span>4 Fingers</span> <span>Bus</span></div>
+            <div class="item" id="mode-sphere"><span>5 Fingers</span> <span>Galaxy</span></div>
+            <div class="item" id="mode-chaos"><span>Fist</span> <span>Chaos</span></div>
+        </div>
+        <div class="panel">
+            <div class="key">👌 RIGHT HAND (Control)</div>
+            <div class="item"><span>Move</span> <span>Rotate View</span></div>
+            <div class="item"><span>Pinch</span> <span>Explode</span></div>
+        </div>
+        <div class="panel">
+            <div class="key">System Status</div>
+            <div id="debug-info">Waiting for Hand...</div>
+        </div>
+    </div>
+
+    <div id="video-container">
+        <video id="input-video" playsinline></video>
+    </div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- Configuration ---
+        const CONFIG = {
+            count: 25000,     // High particle count for detailed shapes
+            size: 0.12,
+            camZ: 40,
+            stabilizeFrames: 15 // Must hold gesture for 15 frames to switch (Anti-Jitter)
+        };
+
+        // --- State Management ---
+        const state = {
+            mouseX: 0, mouseY: 0,
+            expansion: 0,
+            currentShape: 'sphere',
+            targetShape: 'sphere',
+            gestureTimer: 0,      // Counts frames for stabilization
+            rightHandActive: false
+        };
+
+        // --- Three.js Variables ---
+        let scene, camera, renderer, particleSystem;
+        let positions, colors, targetPositions;
+        const geometry = new THREE.BufferGeometry();
+
+        // --- Initialization ---
+        function initThree() {
+            const container = document.body;
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.025);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = CONFIG.camZ;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            // Init Arrays
+            positions = new Float32Array(CONFIG.count * 3);
+            targetPositions = new Float32Array(CONFIG.count * 3);
+            colors = new Float32Array(CONFIG.count * 3);
+
+            const colorObj = new THREE.Color();
+
+            for (let i = 0; i < CONFIG.count; i++) {
+                positions[i * 3] = (Math.random() - 0.5) * 100;
+                positions[i * 3 + 1] = (Math.random() - 0.5) * 100;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 100;
+                
+                // Initial Colors
+                colorObj.setHSL(Math.random(), 0.8, 0.5);
+                colors[i * 3] = colorObj.r;
+                colors[i * 3 + 1] = colorObj.g;
+                colors[i * 3 + 2] = colorObj.b;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            const material = new THREE.PointsMaterial({
+                size: CONFIG.size,
+                vertexColors: true,
+                blending: THREE.AdditiveBlending,
+                depthTest: false,
+                transparent: true,
+                opacity: 0.9
+            });
+
+            particleSystem = new THREE.Points(geometry, material);
+            scene.add(particleSystem);
+
+            // Generate initial shape
+            updateShapeTargets('sphere');
+            highlightUI('sphere');
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            animate();
+        }
+
+        // --- SHAPE GENERATOR ENGINE ---
+        // This is where we mathematically construct the Bus, Car, etc.
+
+        function getRandomPointInBox(w, h, d, offsetX, offsetY, offsetZ) {
+            return {
+                x: (Math.random() - 0.5) * w + offsetX,
+                y: (Math.random() - 0.5) * h + offsetY,
+                z: (Math.random() - 0.5) * d + offsetZ
+            };
+        }
+
+        function getRandomPointInCylinder(radius, length, axis, offsetX, offsetY, offsetZ) {
+            const angle = Math.random() * Math.PI * 2;
+            const r = Math.sqrt(Math.random()) * radius;
+            const l = (Math.random() - 0.5) * length;
+            
+            let x, y, z;
+            if (axis === 'x') { x = l; y = Math.cos(angle) * r; z = Math.sin(angle) * r; }
+            if (axis === 'z') { x = Math.cos(angle) * r; y = Math.sin(angle) * r; z = l; } // Wheel orientation usually
+
+            return { x: x + offsetX, y: y + offsetY, z: z + offsetZ };
+        }
+
+        function updateShapeTargets(type) {
+            state.currentShape = type;
+            const c = new THREE.Color();
+            
+            for (let i = 0; i < CONFIG.count; i++) {
+                const idx = i * 3;
+                let p = { x: 0, y: 0, z: 0 };
+                let color = { h: 0, s: 0, l: 0.5 };
+
+                // --- 1. ROCKET ---
+                if (type === 'rocket') {
+                    const rnd = Math.random();
+                    if (rnd < 0.6) { 
+                        // Body (Cylinder)
+                        p = getRandomPointInCylinder(2.5, 18, 'z', 0, 15, 0); // Vertical cylinder actually
+                        // Manual rotate to vertical
+                        let temp = p.y; p.y = p.x + 2; p.x = temp; 
+                        c.setHSL(0.6, 0.9, 0.6); // Blue body
+                    } else if (rnd < 0.8) {
+                        // Nose Cone
+                        const h = 5; const r = 2.5;
+                        const angle = Math.random() * Math.PI * 2;
+                        const radius = Math.random() * r * (1 - Math.random()); // Cone math
+                        p.x = Math.cos(angle) * radius;
+                        p.z = Math.sin(angle) * radius;
+                        p.y = 11 + Math.random() * h;
+                        c.setHSL(0.0, 1.0, 0.5); // Red tip
+                    } else {
+                        // Fins (3 fins)
+                        const finIdx = Math.floor(Math.random() * 3);
+                        const angle = (finIdx * (Math.PI * 2) / 3);
+                        const r = 3 + Math.random() * 3;
+                        p.x = Math.cos(angle) * r;
+                        p.z = Math.sin(angle) * r;
+                        p.y = -6 + (Math.random() * 4);
+                        c.setHSL(0.1, 1.0, 0.5); // Orange fins
+                    }
+                }
+
+                // --- 2. BIKE (Motorcycle) ---
+                else if (type === 'bike') {
+                    const rnd = Math.random();
+                    if (rnd < 0.3) {
+                        // Front Wheel
+                        p = getRandomPointInCylinder(3.5, 1, 'z', 8, -4, 0);
+                        c.setHSL(0, 0, 0.3); // Dark Grey
+                    } else if (rnd < 0.6) {
+                        // Back Wheel
+                        p = getRandomPointInCylinder(3.5, 1, 'z', -8, -4, 0);
+                        c.setHSL(0, 0, 0.3);
+                    } else if (rnd < 0.9) {
+                        // Body/Frame/Engine
+                        p = getRandomPointInBox(12, 4, 2, 0, -1, 0);
+                        c.setHSL(0.35, 1.0, 0.5); // Green Body
+                    } else {
+                        // Handlebars/Top
+                        p = getRandomPointInBox(4, 2, 6, 6, 3, 0);
+                        c.setHSL(0, 0, 0.8); // Silver
+                    }
+                }
+
+                // --- 3. CAR ---
+                else if (type === 'car') {
+                    const rnd = Math.random();
+                    if (rnd < 0.20) { 
+                        // Wheels (4)
+                        const wx = (Math.random() > 0.5 ? 6 : -6);
+                        const wz = (Math.random() > 0.5 ? 4 : -4);
+                        p = getRandomPointInCylinder(2.5, 1.5, 'z', wx, -3, wz);
+                        c.setHSL(0, 0, 0.2); // Black tires
+                    } else if (rnd < 0.6) {
+                        // Lower Chassis
+                        p = getRandomPointInBox(18, 5, 9, 0, -1, 0);
+                        c.setHSL(0.6, 1.0, 0.5); // Blue Car
+                    } else {
+                        // Upper Cabin
+                        p = getRandomPointInBox(10, 4, 7, -1, 4, 0);
+                        c.setHSL(0.55, 1.0, 0.7); // Windows/Top
+                    }
+                }
+
+                // --- 4. BUS ---
+                else if (type === 'bus') {
+                    const rnd = Math.random();
+                    if (rnd < 0.15) {
+                        // Wheels (Larger, 4 spots)
+                        const wx = (Math.random() > 0.5 ? 7 : -7);
+                        const wz = (Math.random() > 0.5 ? 4 : -4);
+                        p = getRandomPointInCylinder(3, 2, 'z', wx, -5, wz);
+                        c.setHSL(0, 0, 0.2);
+                    } else {
+                        // Main Body (Big Box)
+                        p = getRandomPointInBox(22, 10, 8, 0, 2, 0);
+                        // Windows strip
+                        if (p.y > 3 && p.y < 6) c.setHSL(0.5, 0.8, 0.8); // Glass
+                        else c.setHSL(0.12, 0.9, 0.5); // Yellow Bus
+                    }
+                }
+
+                // --- 5. SPHERE / GALAXY ---
+                else if (type === 'sphere') {
+                    const r = 12;
+                    const phi = Math.acos(-1 + (2 * i) / CONFIG.count);
+                    const theta = Math.sqrt(CONFIG.count * Math.PI) * phi;
+                    p.x = r * Math.cos(theta) * Math.sin(phi);
+                    p.y = r * Math.sin(theta) * Math.sin(phi);
+                    p.z = r * Math.cos(phi);
+                    c.setHSL(0.6 + (p.y/40), 0.8, 0.6);
+                }
+
+                // --- 6. CHAOS ---
+                else {
+                    p.x = (Math.random() - 0.5) * 60;
+                    p.y = (Math.random() - 0.5) * 60;
+                    p.z = (Math.random() - 0.5) * 60;
+                    c.setHSL(Math.random(), 1.0, 0.5);
+                }
+
+                targetPositions[idx] = p.x;
+                targetPositions[idx + 1] = p.y;
+                targetPositions[idx + 2] = p.z;
+
+                colors[idx] = c.r;
+                colors[idx + 1] = c.g;
+                colors[idx + 2] = c.b;
+            }
+            geometry.attributes.color.needsUpdate = true;
+        }
+
+        // --- Animation & Physics ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const posArr = geometry.attributes.position.array;
+            const lerpSpeed = 0.08; 
+
+            for (let i = 0; i < CONFIG.count; i++) {
+                const idx = i * 3;
+                
+                // Retrieve target
+                let tx = targetPositions[idx];
+                let ty = targetPositions[idx + 1];
+                let tz = targetPositions[idx + 2];
+
+                // Apply Interaction (Explosion)
+                if (state.expansion > 0.01) {
+                    const blast = 1 + (state.expansion * 5); // up to 6x size
+                    tx *= blast; ty *= blast; tz *= blast;
+                    
+                    // Add some jitter for explosion effect
+                    tx += (Math.random()-0.5) * state.expansion * 2;
+                    ty += (Math.random()-0.5) * state.expansion * 2;
+                    tz += (Math.random()-0.5) * state.expansion * 2;
+                }
+
+                // Smooth Movement
+                posArr[idx] += (tx - posArr[idx]) * lerpSpeed;
+                posArr[idx + 1] += (ty - posArr[idx + 1]) * lerpSpeed;
+                posArr[idx + 2] += (tz - posArr[idx + 2]) * lerpSpeed;
+            }
+            geometry.attributes.position.needsUpdate = true;
+
+            // Global Rotation Logic
+            if (state.rightHandActive) {
+                // Hand Control
+                const targetRotY = state.mouseX * 3;
+                const targetRotX = state.mouseY * 2;
+                particleSystem.rotation.y += (targetRotY - particleSystem.rotation.y) * 0.1;
+                particleSystem.rotation.x += (targetRotX - particleSystem.rotation.x) * 0.1;
+            } else {
+                // Idle Spin
+                particleSystem.rotation.y += 0.005;
+                // Slowly return X to 0
+                particleSystem.rotation.x += (0 - particleSystem.rotation.x) * 0.05;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+
+        // --- ADVANCED VISION SYSTEM ---
+        async function startVision() {
+            document.getElementById('progress-fill').style.width = "30%";
+            
+            const videoElement = document.getElementById('input-video');
+
+            if (!window.Hands) {
+                alert("MediaPipe failed to load. Check internet.");
+                return;
+            }
+
+            const hands = new window.Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+
+            hands.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.6, // Higher confidence required
+                minTrackingConfidence: 0.6
+            });
+
+            hands.onResults(onHandResults);
+
+            document.getElementById('progress-fill').style.width = "60%";
+
+            const cameraUtils = new window.Camera(videoElement, {
+                onFrame: async () => { await hands.send({image: videoElement}); },
+                width: 640, height: 480
+            });
+
+            document.getElementById('progress-fill').style.width = "100%";
+            await cameraUtils.start();
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        function onHandResults(results) {
+            let rightHand = null;
+            let leftHand = null;
+
+            if (results.multiHandLandmarks) {
+                for (const [index, landmarks] of results.multiHandLandmarks.entries()) {
+                    const label = results.multiHandedness[index].label;
+                    if (label === 'Right') rightHand = landmarks;
+                    if (label === 'Left') leftHand = landmarks;
+                }
+            }
+
+            // --- RIGHT HAND: Interaction ---
+            if (rightHand) {
+                state.rightHandActive = true;
+                // Rotation
+                state.mouseX = (rightHand[9].x - 0.5) * 2; // Middle finger knuckle
+                state.mouseY = -(rightHand[9].y - 0.5) * 2;
+                
+                // Pinch (Explosion)
+                const pinchDist = dist(rightHand[4], rightHand[8]);
+                // Smooth the transition
+                const targetExp = (pinchDist < 0.06) ? 1.0 : 0.0;
+                state.expansion += (targetExp - state.expansion) * 0.1; 
+            } else {
+                state.rightHandActive = false;
+                state.expansion += (0 - state.expansion) * 0.1;
+            }
+
+            // --- LEFT HAND: Shape Logic with STABILIZATION ---
+            if (leftHand) {
+                const fingerCount = countFingers(leftHand);
+                
+                let detectedShape = state.currentShape;
+                if (fingerCount === 1) detectedShape = 'rocket';
+                else if (fingerCount === 2) detectedShape = 'bike';
+                else if (fingerCount === 3) detectedShape = 'car';
+                else if (fingerCount === 4) detectedShape = 'bus';
+                else if (fingerCount === 5) detectedShape = 'sphere';
+                else if (fingerCount === 0) detectedShape = 'chaos';
+
+                // STABILIZER / DEBOUNCE LOGIC
+                // If detected shape matches the *pending* target, increase timer.
+                // If it matches current, do nothing.
+                // If it's a new random shape, reset timer.
+                
+                if (detectedShape === state.targetShape) {
+                    state.gestureTimer++;
+                } else {
+                    state.targetShape = detectedShape;
+                    state.gestureTimer = 0;
+                }
+
+                // Only switch if we held the gesture for N frames
+                if (state.gestureTimer > CONFIG.stabilizeFrames && state.targetShape !== state.currentShape) {
+                    updateShapeTargets(state.targetShape);
+                    highlightUI(state.targetShape);
+                    state.gestureTimer = 0; // Reset
+                }
+
+                document.getElementById('debug-info').innerText = 
+                    `Left: ${fingerCount} Fingers | Right: ${state.rightHandActive ? "Active" : "None"}`;
+            } else {
+                 document.getElementById('debug-info').innerText = "No Hands Detected";
+            }
+        }
+
+        // --- Accurate Finger Counting ---
+        function countFingers(lm) {
+            let count = 0;
+            // 4 Fingers (Index to Pinky)
+            // If Tip Y is less than PIP Y (Higher on screen)
+            if (lm[8].y < lm[6].y) count++;   // Index
+            if (lm[12].y < lm[10].y) count++; // Middle
+            if (lm[16].y < lm[14].y) count++; // Ring
+            if (lm[20].y < lm[18].y) count++; // Pinky
+
+            // Thumb Logic (More complex)
+            // We check if thumb tip is far from index base (Knuckle) in X axis
+            // For Left hand: Thumb is on Right side of hand.
+            // If Thumb Tip x is > Index MCP x, it's open. (Rough approx)
+            if (lm[4].x > lm[3].x) count++;
+
+            return count;
+        }
+
+        function dist(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        function highlightUI(mode) {
+            document.querySelectorAll('.item').forEach(el => {
+                el.classList.remove('active-mode');
+                el.style.color = '#ccc';
+            });
+            const id = `mode-${mode}`;
+            const el = document.getElementById(id);
+            if(el) {
+                el.classList.add('active-mode');
+                el.style.color = 'cyan';
+            }
+        }
+
+        initThree();
+        startVision();
+
+    </script>
+</body>
+</html>
